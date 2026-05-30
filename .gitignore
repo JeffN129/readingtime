@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+readingtime.egg-info/
+*.db
+logs/
+z_mirror_test.txt
+sl_page.txt
+zlib-mirrors/
+*.zip
+*.bat
+*.ps1
+*.vbs

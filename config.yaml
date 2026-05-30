@@ -1,0 +1,18 @@
+llm:
+  base_url: https://api.deepseek.com
+  max_tokens: 1000
+  model: deepseek-chat
+  provider: deepseek
+logging:
+  file: ~/.readingtime/logs/agent.log
+  level: INFO
+shelf:
+  book_lifetime_days: 30
+  language: zh
+  path: E:/Desktop/书架
+  size: 10
+sources:
+  priority:
+  - kgbook
+  kgbook:
+    enabled: true

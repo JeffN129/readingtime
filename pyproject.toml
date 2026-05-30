@@ -1,0 +1,36 @@
+[project]
+name = "readingtime"
+version = "0.1.0"
+description = "AI Agent that automatically maintains a shelf of 10 EPUB books and learns reading preferences from user behavior"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "watchdog>=4.0",
+    "ebooklib>=0.18",
+    "httpx>=0.25",
+    "requests>=2.31",
+    "schedule>=1.2",
+    "openai>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+readingtime = "readingtime.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["readingtime*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
