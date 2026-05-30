@@ -70,44 +70,47 @@ shelf:
 
 ## 🤖 更换 AI 服务商
 
-默认使用 **DeepSeek**（国内可直接注册，便宜好用）。也支持任意 OpenAI 兼容接口。
+默认 **DeepSeek**。支持四家，`.env` 填对应 Key，`config.yaml` 改 `base_url` 和 `model` 即可。
 
 ### DeepSeek（默认）
 
-免费注册获取 Key：https://platform.deepseek.com/api_keys
+注册：https://platform.deepseek.com/api_keys
 
-`.env`：
 ```env
 DEEPSEEK_API_KEY=sk-你的key
 ```
 
 ### OpenAI
 
-`.env`：
 ```env
-DEEPSEEK_API_KEY=sk-你的OpenAI-key
+OPENAI_API_KEY=sk-你的key
 ```
-`config.yaml`：
 ```yaml
 llm:
-  provider: "openai"
   model: "gpt-4o-mini"
   base_url: "https://api.openai.com/v1"
 ```
 
-### 其他兼容接口（硅基流动、阿里百炼等）
+### Anthropic
 
-只要有 OpenAI 兼容的 API 地址和 Key，改两个地方即可：
-
-`.env`：
 ```env
-DEEPSEEK_API_KEY=你的API-Key
+ANTHROPIC_API_KEY=sk-ant-你的key
 ```
-`config.yaml`：
 ```yaml
 llm:
-  model: "你的模型名"
-  base_url: "https://你的API地址/v1"
+  model: "claude-sonnet-4-5"
+  base_url: "https://api.anthropic.com/v1"
+```
+
+### Gemini
+
+```env
+GEMINI_API_KEY=你的key
+```
+```yaml
+llm:
+  model: "gemini-2.5-flash"
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
 ```
 
 ## 🖥️ 开机自启（Windows）
