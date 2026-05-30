@@ -76,6 +76,28 @@ shelf:
 Win+R → shell:startup → 粘贴进去
 ```
 
+## 🛑 停止与删除
+
+**停止运行：**
+```bash
+readingtime stop
+```
+或在任务管理器中结束 `python.exe` 进程。
+
+**取消开机自启：**
+删除启动文件夹中的 `start_readingtime.vbs`：
+```
+Win+R → shell:startup → 删除 start_readingtime.vbs
+```
+
+**彻底删除项目：**
+```bash
+pip uninstall readingtime
+# 然后删除项目文件夹和书架文件夹
+```
+
+书架文件夹位置见 `config.yaml` 中的 `shelf.path`，默认在桌面「书架」。
+
 ## 📝 书源
 
 当前使用 **苦瓜书盘 (kgbook.com)** — 中文电子书，无需代理，直链下载。
