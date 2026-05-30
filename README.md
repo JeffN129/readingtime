@@ -68,6 +68,16 @@ shelf:
   language: "zh"             # 语言偏好
 ```
 
+## 📦 格式转换（可选）
+
+kgbook 下载的书籍可能是 AZW3/MOBI/PDF 格式。如需自动转换为 EPUB，请安装 **Calibre**：
+
+1. 下载安装：https://calibre-ebook.com/download
+2. 安装后 `ebook-convert` 会自动加入系统 PATH
+3. 重启终端即可生效
+
+之后每次下载书籍都会自动转为 EPUB 格式。不装 Calibre 也不影响使用，书籍保持原格式。
+
 ## 🤖 更换 AI 服务商
 
 默认 **DeepSeek**。支持四家，`.env` 填对应 Key，`config.yaml` 改 `base_url` 和 `model` 即可。
