@@ -451,25 +451,64 @@ class ShelfManager:
     # ------------------------------------------------------------------
 
     def _download_book(self, book_result, save_path: Path) -> bool:
-        """Download a book from its source.  Returns True on success."""
+        """Download a book from its source and convert to EPUB if needed.
+
+        After download the actual file may have a non-EPUB extension
+        (e.g. .azw3, .mobi, .pdf).  We detect the real format, convert
+        to EPUB via Calibre if available, and ensure the final file is
+        always at ``save_path`` (the .epub path callers expect).
+        """
         source_name = book_result.source_id.split(":")[0] if ":" in book_result.source_id else ""
         source = _SOURCES.get(source_name)
         if source is None:
-            # Fallback: try gutenberg first, then openlibrary
+            # Fallback: try all sources
             for src in _SOURCES.values():
                 if hasattr(src, "download"):
                     try:
                         if src.download(book_result, str(save_path)):
-                            return True
+                            break
                     except Exception as exc:
                         logger.debug("Fallback download via %s failed: %s", getattr(src, "name", "?"), exc)
+            else:
+                return False
+        else:
+            try:
+                if not source.download(book_result, str(save_path)):
+                    return False
+            except Exception as exc:
+                logger.error("Download error for %s: %s", book_result.title, exc)
+                return False
+
+        # -- Ensure the file is EPUB -------------------------------------------
+        # The source may have renamed the file to its real format (.azw3 etc.)
+        from readingtime.shelf.converter import convert_to_epub, find_book_file
+
+        stem = save_path.stem
+        actual = find_book_file(save_path.parent, stem)
+        if actual is None:
+            logger.error("Downloaded file not found for %s", save_path.name)
             return False
 
-        try:
-            return source.download(book_result, str(save_path))
-        except Exception as exc:
-            logger.error("Download error for %s: %s", book_result.title, exc)
-            return False
+        if actual.suffix.lower() == ".epub":
+            # Already EPUB — rename back to save_path if the source renamed it
+            if actual != save_path:
+                actual.rename(save_path)
+            return True
+
+        # Non-EPUB → convert
+        epub_result = convert_to_epub(actual)
+        if epub_result is None:
+            # Conversion failed or Calibre not installed — keep the original
+            # but rename it to .epub so callers can find it
+            if actual != save_path:
+                actual.rename(save_path)
+            logger.warning("Kept %s in original format (not EPUB)", book_result.title)
+            return True  # Book is still usable
+
+        # Conversion succeeded — ensure it's at save_path
+        if epub_result != save_path:
+            epub_result.rename(save_path)
+        return True
 
     def _extract_epub_metadata(self, path: Path) -> dict:
         """Extract metadata from a downloaded EPUB file."""
