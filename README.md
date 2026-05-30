@@ -68,6 +68,48 @@ shelf:
   language: "zh"             # 语言偏好
 ```
 
+## 🤖 更换 AI 服务商
+
+默认使用 **DeepSeek**（国内可直接注册，便宜好用）。也支持任意 OpenAI 兼容接口。
+
+### DeepSeek（默认）
+
+免费注册获取 Key：https://platform.deepseek.com/api_keys
+
+`.env`：
+```env
+DEEPSEEK_API_KEY=sk-你的key
+```
+
+### OpenAI
+
+`.env`：
+```env
+DEEPSEEK_API_KEY=sk-你的OpenAI-key
+```
+`config.yaml`：
+```yaml
+llm:
+  provider: "openai"
+  model: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+```
+
+### 其他兼容接口（硅基流动、阿里百炼等）
+
+只要有 OpenAI 兼容的 API 地址和 Key，改两个地方即可：
+
+`.env`：
+```env
+DEEPSEEK_API_KEY=你的API-Key
+```
+`config.yaml`：
+```yaml
+llm:
+  model: "你的模型名"
+  base_url: "https://你的API地址/v1"
+```
+
 ## 🖥️ 开机自启（Windows）
 
 将 `start_readingtime.vbs` 复制到启动文件夹：

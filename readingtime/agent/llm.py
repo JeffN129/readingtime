@@ -33,7 +33,7 @@ def _get_client() -> OpenAI:
     """Return a configured OpenAI client (lazy singleton)."""
     global _client
     if _client is None:
-        api_key = os.getenv("DEEPSEEK_API_KEY", "")
+        api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
         base_url = config.llm_base_url
 
         _client = OpenAI(
