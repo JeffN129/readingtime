@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from readingtime.shelf.converter import convert_to_epub, find_book_file, _has_calibre
+from readingtime.shelf.converter import (
+    convert_to_epub,
+    find_book_file,
+    _has_calibre,
+    _detect_format,
+)
 
 
 class TestFindBookFile:
@@ -36,7 +41,6 @@ class TestFindBookFile:
         assert result is None
 
     def test_epub_preferred_over_others(self, tmp_path):
-        # When multiple formats exist, epub should be found first
         (tmp_path / "book.epub").write_text("epub")
         (tmp_path / "book.azw3").write_text("azw3")
         result = find_book_file(tmp_path, "book")
@@ -52,15 +56,48 @@ class TestConvertToEpub:
         assert result == epub
         assert epub.exists()
 
-    def test_no_calibre_returns_none(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            "readingtime.shelf.converter._has_calibre", lambda: False
-        )
+    def test_mislabeled_epub_renamed(self, tmp_path):
+        # A file with .mobi extension but EPUB magic bytes
         mobi = tmp_path / "book.mobi"
-        mobi.write_text("mobi content")
+        # Write EPUB magic bytes (ZIP + mimetype)
+        epub_magic = (
+            b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x00\x00\x00\x00\x08\x00\x00\x00mimetypeapplication/epub+zip"
+            b"PK\x03\x04\x14\x00\x02\x08\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        )
+        mobi.write_bytes(epub_magic)
         result = convert_to_epub(mobi)
-        assert result is None
-        assert mobi.exists()  # original kept
+        assert result is not None
+        assert result.suffix == ".epub"
+        assert result.exists()
+        assert not mobi.exists()  # original renamed
+
+
+class TestDetectFormat:
+    def test_detects_epub(self, tmp_path):
+        f = tmp_path / "test.bin"
+        f.write_bytes(
+            b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00"
+            b"mimetypeapplication/epub+zip"
+        )
+        assert _detect_format(f) == "epub"
+
+    def test_detects_pdf(self, tmp_path):
+        f = tmp_path / "test.bin"
+        f.write_bytes(b"%PDF-1.4\n%abc\n")
+        assert _detect_format(f) == "pdf"
+
+    def test_detects_mobi(self, tmp_path):
+        f = tmp_path / "test.bin"
+        f.write_bytes(b"BOOKMOBI" + b"\x00" * 25)
+        assert _detect_format(f) == "mobi"
+
+    def test_returns_none_for_unknown(self, tmp_path):
+        f = tmp_path / "test.bin"
+        f.write_bytes(b"just some random text not a book")
+        assert _detect_format(f) is None
 
 
 class TestHasCalibre:
