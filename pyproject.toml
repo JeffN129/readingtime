@@ -8,6 +8,7 @@ dependencies = [
     "rich>=13.0",
     "watchdog>=4.0",
     "ebooklib>=0.18",
+    "mobi>=0.4",
     "httpx>=0.25",
     "requests>=2.31",
     "schedule>=1.2",
