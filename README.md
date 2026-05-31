@@ -124,10 +124,10 @@ llm:
 
 ## 🖥️ 开机自启（Windows）
 
-将 `start_readingtime.vbs` 复制到启动文件夹：
+右键 `start_readingtime.vbs` → 创建快捷方式，把快捷方式放入启动文件夹：
 
 ```
-Win+R → shell:startup → 粘贴进去
+Win+R → shell:startup → 粘贴快捷方式
 ```
 
 > VBS 会自动检测所在目录，移动项目文件夹后无需修改路径。
