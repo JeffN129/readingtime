@@ -427,6 +427,53 @@ def add(query: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# undo
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("query", required=False, default=None)
+def undo(query: Optional[str] = None) -> None:
+    """Undo the most recent book removal (within 5 minutes).
+
+    If a partial filename or title is given, undo that specific removal
+    instead.  Restores the book to the shelf and cancels the 'liked'
+    signal.
+    """
+
+    _setup_logging()
+    db.init_db()
+
+    from readingtime.shelf.manager import shelf_manager
+
+    if query:
+        # Fuzzy match against pending removals
+        pending = db.get_all_pending_removals()
+        matches = [
+            p for p in pending
+            if query.lower() in p.get("filename", "").lower()
+            or query.lower() in p.get("title", "").lower()
+        ]
+        if not matches:
+            console.print("[yellow]No pending removals matching that query.[/yellow]")
+            return
+        target = matches[0]
+        result = shelf_manager.undo_removal(target["filename"])
+    else:
+        # Most recent pending removal
+        pending = db.get_all_pending_removals()
+        if not pending:
+            console.print("[yellow]No pending removals to undo.[/yellow]")
+            return
+        # Most recently removed (first in list)
+        result = shelf_manager.undo_removal(pending[0]["filename"])
+
+    if result:
+        console.print("[green]✅ Book restored![/green]")
+    else:
+        console.print("[yellow]⚠ Could not undo — the 5-minute window may have expired.[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # history
 # ---------------------------------------------------------------------------
 

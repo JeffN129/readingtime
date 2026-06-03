@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -138,8 +138,27 @@ class Database:
                 key     TEXT PRIMARY KEY,
                 value   TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS pending_removals (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename    TEXT NOT NULL,
+                book_id     INTEGER REFERENCES books(id),
+                title       TEXT NOT NULL,
+                author      TEXT,
+                dirname     TEXT NOT NULL,
+                source_id   TEXT,
+                removed_at  DATETIME NOT NULL,
+                expires_at  DATETIME NOT NULL
+            );
             """
         )
+        # Migration: add source_id column if it doesn't exist (added for undo feature)
+        try:
+            self.conn.execute(
+                "ALTER TABLE pending_removals ADD COLUMN source_id TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self.conn.commit()
         logger.info("Database tables ensured")
 
@@ -164,12 +183,26 @@ class Database:
         tags: Optional[list[str]] = None,
         page_count: Optional[int] = None,
     ) -> int:
-        """Insert a new book row.  Returns the new row id."""
+        """Insert a new book row, or re-activate a previously-removed one.
+
+        Returns the row id.
+        """
         cursor = self.conn.execute(
             """
             INSERT INTO books (title, author, filename, added_at, source, source_id,
                                language, tags, page_count)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(filename) DO UPDATE SET
+                title=excluded.title,
+                author=excluded.author,
+                source=excluded.source,
+                source_id=excluded.source_id,
+                language=excluded.language,
+                tags=excluded.tags,
+                page_count=excluded.page_count,
+                added_at=excluded.added_at,
+                removed_at=NULL,
+                removal_type=NULL
             """,
             (
                 title,
@@ -238,6 +271,92 @@ class Database:
         """Set is_protected=1 on a book (e.g. file was locked → user reading)."""
         cursor = self.conn.execute(
             "UPDATE books SET is_protected = 1 WHERE filename = ?",
+            (filename,),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # -- pending removals (undo grace period) -------------------------------
+
+    def record_pending_removal(
+        self,
+        filename: str,
+        book_id: int,
+        title: str,
+        author: str = "",
+        dirname: str = "",
+        source_id: str = "",
+        grace_minutes: int = 5,
+    ) -> int:
+        """Record a user removal that can be undone within *grace_minutes*.
+
+        The removal is NOT finalised until ``clear_expired_pending()``
+        processes it after the grace period expires.
+        """
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(minutes=grace_minutes)
+        cursor = self.conn.execute(
+            """
+            INSERT INTO pending_removals (filename, book_id, title, author,
+                                           dirname, source_id, removed_at,
+                                           expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (filename, book_id, title, author, dirname or filename,
+             source_id, now.isoformat(), expires.isoformat()),
+        )
+        self.conn.commit()
+        logger.info("Pending removal recorded: %s (expires %s)", title,
+                    expires.strftime("%H:%M:%S"))
+        return cursor.lastrowid
+
+    def get_pending_removal(self, filename: str) -> Optional[dict[str, Any]]:
+        """Return a pending removal by filename, or None."""
+        row = self.conn.execute(
+            "SELECT * FROM pending_removals WHERE filename = ?", (filename,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def get_all_pending_removals(self) -> list[dict[str, Any]]:
+        """Return all pending removals, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM pending_removals ORDER BY removed_at DESC"
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    def delete_pending_removal(self, filename: str) -> bool:
+        """Remove a pending removal entry (after undo or expiry)."""
+        cursor = self.conn.execute(
+            "DELETE FROM pending_removals WHERE filename = ?", (filename,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def clear_expired_pending(self) -> list[dict[str, Any]]:
+        """Delete and return all entries past their grace period.
+
+        Callers should finalise the signal for each returned entry.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        rows = self.conn.execute(
+            "SELECT * FROM pending_removals WHERE expires_at <= ?", (now,)
+        ).fetchall()
+        expired = [_row_to_dict(r) for r in rows]
+
+        if expired:
+            self.conn.execute(
+                "DELETE FROM pending_removals WHERE expires_at <= ?", (now,)
+            )
+            self.conn.commit()
+            logger.info("Cleared %d expired pending removal(s)", len(expired))
+
+        return expired
+
+    def restore_book(self, filename: str) -> bool:
+        """Clear ``removed_at`` / ``removal_type`` on a book (undo a removal)."""
+        cursor = self.conn.execute(
+            "UPDATE books SET removed_at = NULL, removal_type = NULL "
+            "WHERE filename = ?",
             (filename,),
         )
         self.conn.commit()

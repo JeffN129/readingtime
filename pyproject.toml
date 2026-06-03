@@ -20,6 +20,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-mock>=3.14",
+]
+notifications = [
+    "winotify>=0.3; platform_system=='Windows'",
+    "plyer>=2.1",
 ]
 
 [project.scripts]

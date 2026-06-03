@@ -111,7 +111,7 @@ class TestShelfManagerBasics:
     def test_book_epub_path(self, setup_test_env):
         from readingtime.shelf.manager import shelf_manager
 
-        path = shelf_manager._book_epub_path(shelf_manager._shelf_path, "活着_余华")
+        path = shelf_manager._book_epub_path(shelf_manager.shelf_path, "活着_余华")
         assert path.parent.name == "活着_余华"
         assert path.name == "活着_余华.epub"
 

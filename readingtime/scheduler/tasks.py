@@ -60,6 +60,18 @@ def verify_shelf_count() -> None:
         logger.error("verify_shelf_count failed: %s", exc)
 
 
+def process_pending_removals() -> None:
+    """Finalise expired pending removals (undo grace period expired)."""
+    logger.debug("Scheduled: process_pending_removals")
+    try:
+        from readingtime.shelf.manager import shelf_manager
+        processed = shelf_manager._process_pending_removals()
+        if processed:
+            logger.info("Scheduled: processed %d expired pending removal(s)", processed)
+    except Exception as exc:
+        logger.error("process_pending_removals failed: %s", exc)
+
+
 def regenerate_reading_time_md() -> None:
     """(Re)Generate the READING_TIME.md file in the shelf root."""
     logger.debug("Scheduled: regenerate_reading_time_md")
@@ -139,6 +151,9 @@ def setup_schedule() -> None:
 
     # Daily at 02:10 — regenerate READING_TIME.md
     schedule.every().day.at("02:10").do(regenerate_reading_time_md)
+
+    # Every 2 minutes — process expired pending removals
+    schedule.every(2).minutes.do(process_pending_removals)
 
     # Every 30 minutes — shelf count integrity check
     schedule.every(30).minutes.do(verify_shelf_count)

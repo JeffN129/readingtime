@@ -169,7 +169,7 @@ class KgbookSource(BookSource):
 
             # Extract download link for classid + bookid
             dl_m = re.search(
-                r'GetDown\?classid=(\d+)&(?:amp;)?id=(\d+)',
+                r'GetDown\?classid=(\d+)&(?:amp;|)id=(\d+)',
                 html,
             )
             if dl_m:

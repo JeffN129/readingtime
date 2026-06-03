@@ -28,43 +28,15 @@ from readingtime.database import db
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Source factory — import concrete sources
+# Imports from extracted shelf sub-modules
 # ---------------------------------------------------------------------------
-from readingtime.sources.kgbook import KgbookSource
-
-# LLM-powered agent modules (imported lazily — may not exist until Steps 10-11)
-try:
-    from readingtime.agent.profiler import Profiler as _agent_Profiler
-    from readingtime.agent.recommender import Recommender as _agent_Recommender
-    from readingtime.agent.summarizer import Summarizer as _agent_Summarizer
-except ImportError:
-    _agent_Profiler = None       # type: ignore[assignment]
-    _agent_Recommender = None    # type: ignore[assignment]
-    _agent_Summarizer = None     # type: ignore[assignment]
-
-# -- init source instances ----------------------------------------------------
-_SOURCES: dict[str, object] = {
-    "kgbook": KgbookSource(),
-}
-
-# Popular search terms for initial shelf seeding (no LLM, no user profile yet)
-_SEED_QUERIES = [
-    "活着 余华",
-    "三体 刘慈欣",
-    "红楼梦 曹雪芹",
-    "百年孤独 马尔克斯",
-    "围城 钱钟书",
-    "平凡的世界 路遥",
-    "人类简史 赫拉利",
-    "明朝那些事儿",
-    "小王子",
-    "局外人 加缪",
-    "1984 奥威尔",
-    "骆驼祥子 老舍",
-    "呐喊 鲁迅",
-    "边城 沈从文",
-    "白鹿原 陈忠实",
-]
+from readingtime.agent.capabilities import agent_capabilities
+from readingtime.notifier import notify
+from readingtime.shelf.activity_log import log_activity
+from readingtime.shelf.paths import (
+    safe_dirname, candidate_key, book_epub_path, book_note_path, list_epub_files,
+)
+from readingtime.shelf.sourcing import _SOURCES, _SEED_QUERIES, simplify_query
 
 
 class ShelfManager:
@@ -74,16 +46,14 @@ class ShelfManager:
     and filesystem — ShelfManager itself is stateless beyond cached config.
     """
 
-    def __init__(self) -> None:
-        self._shelf_path = config.shelf_path
-
     # ------------------------------------------------------------------
     # Shelf queries
     # ------------------------------------------------------------------
 
     @property
     def shelf_path(self) -> Path:
-        return self._shelf_path
+        """Path to the bookshelf directory (read from live config)."""
+        return config.shelf_path
 
     def get_current_books(self) -> list[dict]:
         """Return all books currently on the shelf (removed_at IS NULL)."""
@@ -101,9 +71,12 @@ class ShelfManager:
         """Called by the watcher when the user manually deletes/moves an EPUB.
 
         1. Mark the book as removed with 'manual' reason
-        2. Record a 'liked' signal for the user profile
-        3. Trigger refill to maintain shelf size
+        2. Record a pending removal (5-min grace period for undo)
+        3. After grace period expires → record 'liked' signal + refill
         """
+        # Process any expired pending removals first
+        self._process_pending_removals()
+
         book = db.get_book_by_filename(filename)
         if book is None:
             logger.warning(
@@ -113,19 +86,118 @@ class ShelfManager:
             return
 
         db.mark_removed(filename, "manual")
-        logger.info("User removed: %s — recording as LIKED", book.get("title"))
+        logger.info("User removed: %s — pending undo (5-min grace)", book.get("title"))
+        log_activity(self.shelf_path, "⏳ 待确认", book.get("title", "?"),
+                      book.get("author", ""), "5分钟内可恢复 (readingtime undo)")
 
-        # Extract features for the profiler
-        features = self._extract_book_features(book)
+        # Record as pending — signal is NOT recorded yet
+        db.record_pending_removal(
+            filename=filename,
+            book_id=book["id"],
+            title=book.get("title", "?"),
+            author=book.get("author", ""),
+            dirname=filename,
+            source_id=book.get("source_id") or "",
+        )
 
-        # Record the liked signal
-        db.record_signal(book["id"], "liked", features)
+        # Notify about pending removal
+        notify("📖 已读完？", f"《{book.get('title', '?')}》已移除 — 5分钟内可运行 readingtime undo 恢复")
 
-        # Update user profile
-        self._update_profile_from_signal("liked", features)
+        # Don't refill yet — wait for the grace period to expire
 
-        # Refill
-        self._refill_if_needed()
+    def undo_removal(self, filename: str) -> bool:
+        """Undo a book removal within the 5-minute grace period.
+
+        Restores the book entry (clears ``removed_at``), removes the
+        pending record, and logs the restoration.  No signal is recorded
+        — the undo is treated as if the deletion never happened.
+
+        Returns ``True`` if restored, ``False`` if no pending entry or
+        the grace period has already expired.
+        """
+        pending = db.get_pending_removal(filename)
+        if pending is None:
+            logger.warning("No pending removal found for %s", filename)
+            return False
+
+        now = datetime.now(timezone.utc)
+        expires_at = datetime.fromisoformat(pending["expires_at"])
+        if now > expires_at:
+            logger.warning("Undo window expired for %s", filename)
+            db.delete_pending_removal(filename)
+            return False
+
+        # Restore the book in the database
+        db.restore_book(filename)
+        db.delete_pending_removal(filename)
+        log_activity(self.shelf_path, "↩️ 恢复", pending["title"],
+                      pending.get("author", ""), "用户撤销删除")
+        notify("↩️ 已恢复", f"《{pending['title']}》已重新加入书架")
+        logger.info("Undo: restored %s", pending["title"])
+
+        # Try to re-download (user already deleted the files)
+        source_id = pending.get("source_id", "")
+        if source_id:
+            try:
+                from readingtime.sources.base import BookResult
+                # Construct a minimal BookResult for re-download
+                book_result = BookResult(
+                    source_id=source_id,
+                    title=pending["title"],
+                    author=pending.get("author", ""),
+                    formats=["epub"],
+                    epub_download_url="",
+                )
+                dirname = pending.get("dirname", filename)
+                save_path = self._book_epub_path(self.shelf_path, dirname)
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                success = self._download_book(book_result, save_path)
+                if success:
+                    logger.info("Undo: re-downloaded %s", pending["title"])
+                else:
+                    logger.warning("Undo: could not re-download %s — DB entry restored anyway",
+                                   pending["title"])
+            except Exception as exc:
+                logger.warning("Undo: re-download error for %s: %s", pending["title"], exc)
+        return True
+
+    def _process_pending_removals(self) -> int:
+        """Finalise any expired pending removals.
+
+        For each entry whose grace period has passed:
+        1. Record a 'liked' signal
+        2. Update the user profile
+        3. Log the confirmation
+
+        Call this at the top of every lifecycle entry point so that
+        stale pending entries are always cleaned up promptly.
+
+        Returns the number of entries processed.
+        """
+        expired = db.clear_expired_pending()
+        if not expired:
+            return 0
+
+        for entry in expired:
+            book = db.get_book_by_id(entry["book_id"])
+            if book is None:
+                logger.debug("Pending removal for deleted book %d, skipping",
+                             entry["book_id"])
+                continue
+
+            features = self._extract_book_features(book)
+            db.record_signal(book["id"], "liked", features)
+            self._update_profile_from_signal("liked", features)
+            log_activity(self.shelf_path, "❤️ 已确认", entry["title"],
+                          entry.get("author", ""), "用户喜欢（已确认）")
+
+        logger.info("Processed %d expired pending removal(s)", len(expired))
+
+        # Now that signals are recorded, refill if needed
+        if self.current_count() < config.shelf_size:
+            self.refill()
+
+        return len(expired)
 
     # ------------------------------------------------------------------
     # System-initiated removal (auto-expiry / neutral signal)
@@ -140,6 +212,7 @@ class ShelfManager:
         3. Delete the file (with system_state flag so watcher ignores it)
         4. Trigger refill
         """
+        self._process_pending_removals()
         book = db.get_book_by_filename(filename)
         if book is None:
             logger.warning("Auto-expiry on unknown file: %s", filename)
@@ -148,10 +221,24 @@ class ShelfManager:
 
         db.mark_removed(filename, "auto_expired")
         logger.info("Auto-expired: %s — recording as NEUTRAL", book.get("title"))
+        # Compute days on shelf for the log
+        days_on = "?"
+        added_str = book.get("added_at", "")
+        if added_str:
+            try:
+                added_at = datetime.fromisoformat(added_str)
+                days_on = str((datetime.now(timezone.utc) - added_at).days)
+            except (ValueError, TypeError):
+                pass
+        log_activity(self.shelf_path, "⏰ 过期", book.get("title", "?"),
+                      book.get("author", ""), f"在架{days_on}天")
 
         features = self._extract_book_features(book)
         db.record_signal(book["id"], "neutral", features)
         self._update_profile_from_signal("neutral", features)
+
+        # Notify
+        notify("⏰ 自动过期", f"《{book.get('title', '?')}》在架{days_on}天，已自动移除")
 
         # Delete the file (set flag so watcher ignores it)
         self._system_delete_file(filename)
@@ -168,7 +255,7 @@ class ShelfManager:
         so the watcher knows this is NOT a user action."""
         import shutil
         db.set_state("agent_is_deleting", dirname)
-        folder_path = self._shelf_path / dirname
+        folder_path = self.shelf_path / dirname
         try:
             if folder_path.exists():
                 shutil.rmtree(folder_path)
@@ -196,6 +283,7 @@ class ShelfManager:
             4. Score candidates (LLM if available, else heuristic)
             5. Download the top-scored book → generate note → repeat
         """
+        self._process_pending_removals()
         added: list[str] = []
         target = config.shelf_size
         current_count = self.current_count()
@@ -218,9 +306,11 @@ class ShelfManager:
         seen = on_shelf | history
 
         fresh = [c for c in candidates if self._candidate_key(c) not in seen]
+        using_fallback = False
         if not fresh:
             logger.warning("No fresh candidates found after dedup — using all candidates")
             fresh = candidates
+            using_fallback = True
 
         # Score and sort
         scored = self._score_candidates(fresh, profile)
@@ -231,10 +321,10 @@ class ShelfManager:
                 break
 
             dirname = self._safe_dirname(book_result)
-            if dirname in seen:
+            if not using_fallback and dirname in seen:
                 continue
 
-            save_path = self._book_epub_path(self._shelf_path, dirname)
+            save_path = self._book_epub_path(self.shelf_path, dirname)
             logger.info(
                 "Downloading: %s by %s (score=%.1f)",
                 book_result.title,
@@ -267,6 +357,10 @@ class ShelfManager:
             seen.add(dirname)
             added.append(dirname)
             logger.info("Added to shelf: %s", book_result.title)
+            source_name = book_result.source_id.split(":")[0] if ":" in book_result.source_id else "?"
+            log_activity(self.shelf_path, "➕ 补充", book_result.title,
+                          book_result.author, source_name)
+            notify("📚 新书上架", f"《{book_result.title}》已加入书架 — 来自 {source_name}")
 
         if len(added) < needed:
             logger.warning(
@@ -294,8 +388,9 @@ class ShelfManager:
         Uses popular / classic search terms instead of a user profile
         (which doesn't exist yet).  Returns the number of books added.
         """
-        logger.info("Initializing shelf at %s", self._shelf_path)
-        self._shelf_path.mkdir(parents=True, exist_ok=True)
+        self._process_pending_removals()
+        logger.info("Initializing shelf at %s", self.shelf_path)
+        self.shelf_path.mkdir(parents=True, exist_ok=True)
 
         current = self.current_count()
         needed = config.shelf_size - current
@@ -318,7 +413,7 @@ class ShelfManager:
             # Pick a random result from top candidates (no profile to score against)
             book = random.choice(results[:5])
             dirname = self._safe_dirname(book)
-            save_path = self._book_epub_path(self._shelf_path, dirname)
+            save_path = self._book_epub_path(self.shelf_path, dirname)
 
             if save_path.exists():
                 continue
@@ -340,8 +435,13 @@ class ShelfManager:
             )
             added += 1
             logger.info("Seeded: %s by %s", book.title, book.author)
+            source_name = book.source_id.split(":")[0] if ":" in book.source_id else "?"
+            log_activity(self.shelf_path, "➕ 补充", book.title,
+                          book.author, source_name)
 
         logger.info("Shelf initialized with %d books", added)
+        if added > 0:
+            notify("🎉 书架就绪", f"已为你准备了 {added} 本书，开始阅读吧！")
         return added
 
     # ------------------------------------------------------------------
@@ -369,7 +469,7 @@ class ShelfManager:
         # Try each result until one downloads successfully
         for book_result in results[:10]:
             dirname = self._safe_dirname(book_result)
-            save_path = self._book_epub_path(self._shelf_path, dirname)
+            save_path = self._book_epub_path(self.shelf_path, dirname)
 
             if save_path.exists():
                 continue
@@ -393,6 +493,9 @@ class ShelfManager:
             )
             self._generate_reading_note(book_result, save_path, metadata, book_id, dirname)
             logger.info("add_single_book: added %s", book_result.title)
+            log_activity(self.shelf_path, "➕ 补充", book_result.title,
+                          book_result.author, source_name)
+            notify("📚 新书上架", f"《{book_result.title}》已加入书架 — 来自 {source_name}")
             return dirname
 
         return None
@@ -410,6 +513,7 @@ class ShelfManager:
 
         Returns the number of books expired.
         """
+        self._process_pending_removals()
         books = db.get_current_books()
         lifetime = config.book_lifetime_days
         now = datetime.now(timezone.utc)
@@ -556,7 +660,7 @@ class ShelfManager:
 
 > {self._generate_recommendation_reason(book_result)}
 """
-            note_path = self._book_note_path(self._shelf_path, dirname) if dirname else Path(str(epub_path) + ".readingnote.md")
+            note_path = self._book_note_path(self.shelf_path, dirname) if dirname else Path(str(epub_path) + ".readingnote.md")
             note_path.write_text(note_content, encoding="utf-8")
             logger.debug("Reading note written: %s", note_path.name)
 
@@ -566,9 +670,9 @@ class ShelfManager:
     def _generate_summary(self, book_result, epub_path: Path) -> str:
         """Generate a book summary — LLM if available, else description fallback."""
         # Try LLM summarizer first
-        if _agent_Summarizer is not None:
+        if agent_capabilities.has_summarizer:
             try:
-                summarizer = _agent_Summarizer()
+                summarizer = agent_capabilities.summarizer_cls()
                 return summarizer.generate(book_result, str(epub_path))
             except Exception as exc:
                 logger.warning("LLM summarizer failed, using fallback: %s", exc)
@@ -580,9 +684,9 @@ class ShelfManager:
 
     def _generate_recommendation_reason(self, book_result) -> str:
         """Generate a one-line 'why you'll like this' — LLM or template."""
-        if _agent_Summarizer is not None:
+        if agent_capabilities.has_summarizer:
             try:
-                summarizer = _agent_Summarizer()
+                summarizer = agent_capabilities.summarizer_cls()
                 return summarizer.generate_reason(book_result)
             except Exception:
                 pass
@@ -625,9 +729,9 @@ class ShelfManager:
 
     def _update_profile_from_signal(self, signal: str, features: dict) -> None:
         """Update the profile table based on a new signal."""
-        if _agent_Profiler is not None:
+        if agent_capabilities.has_profiler:
             try:
-                profiler = _agent_Profiler()
+                profiler = agent_capabilities.profiler_cls()
                 profiler.update_profile(signal, features)
                 return
             except Exception as exc:
@@ -678,9 +782,9 @@ class ShelfManager:
         # Only use LLM when we have real preference data
         has_profile = bool(liked_tags or liked_authors)
 
-        if has_profile and _agent_Recommender is not None:
+        if has_profile and agent_capabilities.has_recommender:
             try:
-                recommender = _agent_Recommender()
+                recommender = agent_capabilities.recommender_cls()
                 queries = recommender.generate_queries(profile)
                 if queries:
                     return queries[:5]
@@ -728,15 +832,22 @@ class ShelfManager:
 
             # Z-Library returns empty list when not configured
             for query in queries:
-                try:
-                    # Don't filter by language — Chinese books often have varied language tags
-                    batch = source.search(query, language="", limit=5)
-                except NotImplementedError:
-                    logger.debug("%s.search not implemented — skipping", source_name)
-                    continue
-                except Exception as exc:
-                    logger.error("Search error in %s for '%s': %s", source_name, query, exc)
-                    continue
+                # Try the original query, then fall back to a simplified version
+                # (kgbook returns 0 results for "Title Author" queries)
+                for attempt, q in enumerate([query] + simplify_query(query)):
+                    try:
+                        # Don't filter by language — Chinese books often have varied language tags
+                        batch = source.search(q, language="", limit=5)
+                    except NotImplementedError:
+                        logger.debug("%s.search not implemented — skipping", source_name)
+                        continue
+                    except Exception as exc:
+                        logger.error("Search error in %s for '%s': %s", source_name, q, exc)
+                        continue
+                    if batch:
+                        if attempt > 0:
+                            logger.debug("Query '%s' → simplified to '%s' → %d results", query, q, len(batch))
+                        break
 
                 for r in batch:
                     key = self._candidate_key(r)
@@ -753,9 +864,9 @@ class ShelfManager:
         Uses LLM if available; otherwise heuristic scoring based on tag overlap.
         Returns [(BookResult, score), ...].
         """
-        if _agent_Recommender is not None and len(candidates) >= 3:
+        if agent_capabilities.has_recommender and len(candidates) >= 3:
             try:
-                recommender = _agent_Recommender()
+                recommender = agent_capabilities.recommender_cls()
                 return recommender.score_candidates(candidates, profile)
             except Exception as exc:
                 logger.warning("LLM scoring failed, using heuristic: %s", exc)
@@ -797,66 +908,32 @@ class ShelfManager:
         return scored
 
     # ------------------------------------------------------------------
-    # Private: utilities
+    # Private: utilities (thin wrappers — real logic in shelf/paths.py)
     # ------------------------------------------------------------------
 
     def _list_epub_files(self) -> list[str]:
-        """Return list of .epub filenames currently on disk in the shelf.
-
-        Each book is in its own subdirectory — count subdirs that contain an EPUB.
-        """
-        if not self._shelf_path.exists():
-            return []
-        epub_files = []
-        for item in self._shelf_path.iterdir():
-            if item.is_dir():
-                # Check if this directory contains an EPUB file
-                epubs = list(item.glob("*.epub"))
-                if epubs:
-                    epub_files.append(epubs[0].name)
-        return sorted(epub_files)
+        """Return list of .epub filenames currently on disk in the shelf."""
+        return list_epub_files(self.shelf_path)
 
     @staticmethod
     def _candidate_key(book_result) -> str:
         """Generate a stable dedup key for a BookResult."""
-        title = book_result.title.lower().strip() if book_result.title else ""
-        author = book_result.author.lower().strip() if book_result.author else ""
-        return f"{title}||{author}"
+        return candidate_key(book_result)
 
     @staticmethod
     def _safe_dirname(book_result) -> str:
-        """Generate a safe directory name for a BookResult.
-
-        Each book lives in its own folder: ``{dirname}/{dirname}.epub``.
-        """
-        title = book_result.title or "unknown"
-        author = book_result.author or "unknown"
-
-        # Take last part of author name as short identifier
-        surname = author.split()[-1] if author else "unknown"
-
-        # Sanitize: keep letters (incl. CJK), digits, spaces, dashes, underscores
-        safe_title = "".join(
-            c if c.isalpha() or c.isdigit() or c in " _-" else "" for c in title
-        )
-        safe_title = safe_title.strip()[:60]
-        safe_title = safe_title.replace(" ", "_")
-
-        safe_author = "".join(
-            c if c.isalpha() or c.isdigit() else "" for c in surname
-        )[:15]
-
-        return f"{safe_title}_{safe_author}" if safe_author else safe_title
+        """Generate a safe directory name for a BookResult."""
+        return safe_dirname(book_result)
 
     @staticmethod
     def _book_epub_path(shelf_path, dirname: str) -> Path:
         """Full path to the EPUB file inside its book folder."""
-        return shelf_path / dirname / f"{dirname}.epub"
+        return book_epub_path(shelf_path, dirname)
 
     @staticmethod
     def _book_note_path(shelf_path, dirname: str) -> Path:
         """Full path to the reading note inside its book folder."""
-        return shelf_path / dirname / f"{dirname}.readingnote.md"
+        return book_note_path(shelf_path, dirname)
 
 
 # ---------------------------------------------------------------------------
