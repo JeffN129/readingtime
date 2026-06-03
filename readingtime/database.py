@@ -88,6 +88,7 @@ class Database:
             self._conn = sqlite3.connect(
                 str(path),
                 detect_types=sqlite3.PARSE_DECLTYPES,
+                check_same_thread=False,
             )
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")

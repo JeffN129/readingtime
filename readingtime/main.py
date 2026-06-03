@@ -45,6 +45,27 @@ console = Console()
 PID_FILE = Path("~/.readingtime/daemon.pid").expanduser()
 
 
+def _pid_is_alive(pid_str: str) -> bool:
+    """Check whether a process with the given PID string is actually running."""
+    try:
+        pid = int(pid_str)
+    except ValueError:
+        return False
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_INFORMATION = 0x0400
+        handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+        if handle == 0:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -146,13 +167,21 @@ def start() -> None:
 
     if PID_FILE.exists():
         pid = PID_FILE.read_text().strip()
-        console.print(f"[yellow]⚠ Daemon already running? PID file exists: {pid}[/yellow]")
-        console.print("Run [bold]readingtime stop[/bold] first if you want to restart.")
-        return
+        if _pid_is_alive(pid):
+            console.print(f"[yellow]⚠ Daemon already running? PID file exists: {pid}[/yellow]")
+            console.print("Run [bold]readingtime stop[/bold] first if you want to restart.")
+            return
+        else:
+            console.print(f"[dim]Stale PID file found (PID {pid} is gone), cleaning up...[/dim]")
+            PID_FILE.unlink()
 
     _setup_logging()
     _resolve_shelf_path()
     db.init_db()
+
+    # Init interactive notification system (winotify Notifier)
+    from readingtime.notifier import init_ask_manager
+    init_ask_manager()
 
     console.print("[bold cyan]📚 Starting ReadingTime agent...[/bold cyan]")
 
@@ -182,6 +211,8 @@ def start() -> None:
         console.print("\n[yellow]🛑 Shutting down...[/yellow]")
         stop_scheduler()
         watcher.stop()
+        from readingtime.notifier import shutdown_ask_manager
+        shutdown_ask_manager()
         db.close()
         if PID_FILE.exists():
             PID_FILE.unlink()

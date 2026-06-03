@@ -319,12 +319,12 @@ class TestNotificationHooks:
         _make_book_dir(shelf_path, "notif_book_Author")
         db.add_book("Notif Book", "notif_book_Author", author="Author")
 
-        with patch("readingtime.shelf.manager.notify") as mock_notify:
+        with patch("readingtime.notifier.ask_liked_book") as mock_ask:
             shelf_manager.handle_user_removal("notif_book_Author")
-            mock_notify.assert_called()
-            # Should mention undo
-            args = mock_notify.call_args
-            assert "undo" in str(args).lower() or "恢复" in str(args)
+            mock_ask.assert_called()
+            # Should pass book info to the interactive ask
+            args = mock_ask.call_args
+            assert "Notif Book" in str(args)
 
     def test_notify_on_auto_expiry(self, setup_env):
         from readingtime.shelf.manager import shelf_manager

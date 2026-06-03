@@ -2,8 +2,7 @@
 Set objShell = CreateObject("Wscript.Shell")
 Set objFSO = CreateObject("Scripting.FileSystemObject")
 scriptDir = objFSO.GetParentFolderName(WScript.ScriptFullName)
-batPath = scriptDir & "\start_readingtime.bat"
 
-' 先切到项目目录再运行
+' 先切到项目目录，使用完整 Python 路径启动（避免 PATH 未加载问题）
 objShell.CurrentDirectory = scriptDir
-objShell.Run "cmd /c ""cd /d " & scriptDir & " && readingtime start""", 0, False
+objShell.Run "cmd /c ""cd /d " & scriptDir & " && C:\Python314\python.exe -m readingtime.main start""", 0, False

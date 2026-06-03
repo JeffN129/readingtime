@@ -101,6 +101,7 @@ def _write_reading_time_md() -> None:
         "|---|------|------|------|------------|---------|---------|",
     ]
 
+    expiring_count = 0
     for i, book in enumerate(books, 1):
         title = book.get("title", "Unknown")
         author = book.get("author", "Unknown")
@@ -112,19 +113,36 @@ def _write_reading_time_md() -> None:
         # Calculate days on shelf and days remaining
         added_str = book.get("added_at", "")
         days_on_shelf = "?"
-        days_left = "?"
+        days_left_str = "?"
+        days_left_num = 999
         if added_str:
             try:
                 added_at = datetime.fromisoformat(added_str)
                 days_on_shelf = str((now - added_at).days)
-                days_left = str(max(0, config.book_lifetime_days - (now - added_at).days))
+                days_left_num = max(0, config.book_lifetime_days - (now - added_at).days)
+                days_left_str = str(days_left_num)
             except (ValueError, TypeError):
                 pass
 
+        # Visual marker for expiring books
+        if days_left_num <= 3:
+            days_left_str = f"⚠️ {days_left_str} 天"
+            expiring_count += 1
+        elif days_left_num <= 7:
+            days_left_str = f"⏳ {days_left_str} 天"
+
         lines.append(
             f"| {i} | {title} | {author} | {lang} | {est_str} | "
-            f"{days_on_shelf} 天 | {days_left} 天 |"
+            f"{days_on_shelf} 天 | {days_left_str} |"
         )
+
+    # Summary line
+    summary_parts = [f"📊 共 {len(books)} 本"]
+    if expiring_count > 0:
+        summary_parts.append(f"⚠️ {expiring_count} 本即将过期")
+    lines.append("")
+    lines.append("> " + " | ".join(summary_parts))
+    lines.append("")
 
     lines.extend([
         "",
@@ -170,6 +188,17 @@ def run_scheduler() -> None:
     global _running
     _running = True
     setup_schedule()
+
+    # Run integrity checks immediately on startup (handles reboot / PID-residue)
+    for task_name, task_fn in [
+        ("check_expirations", check_expirations),
+        ("verify_shelf_count", verify_shelf_count),
+        ("regenerate_reading_time_md", regenerate_reading_time_md),
+    ]:
+        try:
+            task_fn()
+        except Exception as exc:
+            logger.error("Startup task %s failed: %s", task_name, exc)
 
     logger.info("Scheduler loop started")
     while _running:

@@ -15,6 +15,7 @@ dependencies = [
     "openai>=2.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
+    "winotify>=0.3; platform_system=='Windows'",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +24,6 @@ dev = [
     "pytest-mock>=3.14",
 ]
 notifications = [
-    "winotify>=0.3; platform_system=='Windows'",
     "plyer>=2.1",
 ]
 

@@ -100,8 +100,14 @@ class ShelfManager:
             source_id=book.get("source_id") or "",
         )
 
-        # Notify about pending removal
-        notify("📖 已读完？", f"《{book.get('title', '?')}》已移除 — 5分钟内可运行 readingtime undo 恢复")
+        # Ask the user if they liked this book (interactive notification with buttons)
+        from readingtime.notifier import ask_liked_book
+        ask_liked_book(
+            book_id=book["id"],
+            filename=filename,
+            title=book.get("title", "?"),
+            author=book.get("author", ""),
+        )
 
         # Don't refill yet — wait for the grace period to expire
 
@@ -548,7 +554,40 @@ class ShelfManager:
         if expired == 0:
             logger.debug("No books expired (checked %d on shelf)", len(books))
 
+        # Warn about books expiring soon
+        self._warn_expiring_soon(books, lifetime, now)
+
         return expired
+
+    def _warn_expiring_soon(self, books: list[dict], lifetime: int, now: datetime) -> None:
+        """Send notifications for books that will expire within 3 days."""
+        warn_threshold = 3
+        expiring = []
+        for book in books:
+            if book.get("is_protected"):
+                continue
+            added_str = book.get("added_at", "")
+            if not added_str:
+                continue
+            try:
+                added_at = datetime.fromisoformat(added_str)
+            except (ValueError, TypeError):
+                continue
+            remaining = lifetime - (now - added_at).days
+            if 0 < remaining <= warn_threshold:
+                expiring.append((book, remaining))
+
+        if not expiring:
+            return
+
+        if len(expiring) == 1:
+            b, days = expiring[0]
+            notify("⚠️ 即将过期", f"《{b.get('title', '?')}》还剩 {days} 天将从书架移除")
+        else:
+            names = "、".join(b.get("title", "?") for b, _ in expiring[:3])
+            if len(expiring) > 3:
+                names += f" 等{len(expiring)}本"
+            notify("⚠️ 即将过期", f"{names}\n将在 {warn_threshold} 天内从书架移除")
 
     # ------------------------------------------------------------------
     # Private: book download & metadata helpers
@@ -561,58 +600,69 @@ class ShelfManager:
         (e.g. .azw3, .mobi, .pdf).  We detect the real format, convert
         to EPUB via Calibre if available, and ensure the final file is
         always at ``save_path`` (the .epub path callers expect).
+
+        Sets ``agent_is_deleting`` flag during download to prevent the
+        filesystem watcher from misinterpreting format-rename operations
+        as user deletions.
         """
-        source_name = book_result.source_id.split(":")[0] if ":" in book_result.source_id else ""
-        source = _SOURCES.get(source_name)
-        if source is None:
-            # Fallback: try all sources
-            for src in _SOURCES.values():
-                if hasattr(src, "download"):
-                    try:
-                        if src.download(book_result, str(save_path)):
-                            break
-                    except Exception as exc:
-                        logger.debug("Fallback download via %s failed: %s", getattr(src, "name", "?"), exc)
-            else:
-                return False
-        else:
-            try:
-                if not source.download(book_result, str(save_path)):
+        dirname = save_path.parent.name
+
+        # Block watcher from seeing our file operations as "user removals"
+        db.set_state("agent_is_deleting", dirname)
+        try:
+            source_name = book_result.source_id.split(":")[0] if ":" in book_result.source_id else ""
+            source = _SOURCES.get(source_name)
+            if source is None:
+                # Fallback: try all sources
+                for src in _SOURCES.values():
+                    if hasattr(src, "download"):
+                        try:
+                            if src.download(book_result, str(save_path)):
+                                break
+                        except Exception as exc:
+                            logger.debug("Fallback download via %s failed: %s", getattr(src, "name", "?"), exc)
+                else:
                     return False
-            except Exception as exc:
-                logger.error("Download error for %s: %s", book_result.title, exc)
+            else:
+                try:
+                    if not source.download(book_result, str(save_path)):
+                        return False
+                except Exception as exc:
+                    logger.error("Download error for %s: %s", book_result.title, exc)
+                    return False
+
+            # -- Ensure the file is EPUB -------------------------------------------
+            # The source may have renamed the file to its real format (.azw3 etc.)
+            from readingtime.shelf.converter import convert_to_epub, find_book_file
+
+            stem = save_path.stem
+            actual = find_book_file(save_path.parent, stem)
+            if actual is None:
+                logger.error("Downloaded file not found for %s", save_path.name)
                 return False
 
-        # -- Ensure the file is EPUB -------------------------------------------
-        # The source may have renamed the file to its real format (.azw3 etc.)
-        from readingtime.shelf.converter import convert_to_epub, find_book_file
+            if actual.suffix.lower() == ".epub":
+                # Already EPUB — rename back to save_path if the source renamed it
+                if actual != save_path:
+                    actual.rename(save_path)
+                return True
 
-        stem = save_path.stem
-        actual = find_book_file(save_path.parent, stem)
-        if actual is None:
-            logger.error("Downloaded file not found for %s", save_path.name)
-            return False
+            # Non-EPUB → convert
+            epub_result = convert_to_epub(actual)
+            if epub_result is None:
+                # Conversion failed or Calibre not installed — keep the original
+                # but rename it to .epub so callers can find it
+                if actual != save_path:
+                    actual.rename(save_path)
+                logger.warning("Kept %s in original format (not EPUB)", book_result.title)
+                return True  # Book is still usable
 
-        if actual.suffix.lower() == ".epub":
-            # Already EPUB — rename back to save_path if the source renamed it
-            if actual != save_path:
-                actual.rename(save_path)
+            # Conversion succeeded — ensure it's at save_path
+            if epub_result != save_path:
+                epub_result.rename(save_path)
             return True
-
-        # Non-EPUB → convert
-        epub_result = convert_to_epub(actual)
-        if epub_result is None:
-            # Conversion failed or Calibre not installed — keep the original
-            # but rename it to .epub so callers can find it
-            if actual != save_path:
-                actual.rename(save_path)
-            logger.warning("Kept %s in original format (not EPUB)", book_result.title)
-            return True  # Book is still usable
-
-        # Conversion succeeded — ensure it's at save_path
-        if epub_result != save_path:
-            epub_result.rename(save_path)
-        return True
+        finally:
+            db.clear_state("agent_is_deleting")
 
     def _extract_epub_metadata(self, path: Path) -> dict:
         """Extract metadata from a downloaded EPUB file."""
